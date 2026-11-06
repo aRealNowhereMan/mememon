@@ -1,86 +1,122 @@
 # Proyecto Semestral: Final Reality Tactics
 
-## Avance hasta EF1
+## Resumen del Proyecto y Avance hasta EF2 (Tarea 2)
 
-El modelo está en `src/main/scala/model`, bajo el paquete `cl.uchile.dcc.model`.
-Cada clase o trait tiene su propio archivo. Se usa herencia básica para compartir
-atributos, `Option` para valores opcionales y colecciones nativas de Scala.
+Este proyecto implementa la lógica de combate táctico por turnos inspirada en *Final Fantasy Tactics*, desarrollada en Scala 3 aplicando metodologías avanzadas de diseño orientado a objetos (**MVC**, **Double Dispatch**, principios **SOLID**).
 
-- `units`: caballero, arquero, ladrón, ambos magos y enemigo; vida, maná,
-  inventario y slot de arma. `Player` reconoce la derrota cuando todas sus
-  unidades tienen vida cero (también si su lista está vacía).
-- `items`: cinco armas y cuatro pociones. Un arma puede no tener dueño todavía.
-- `actions`: las ocho acciones de EP2, con listas tipadas de armas o pociones y
-  una jerarquía sencilla para magia blanca y negra.
-- `map`: paneles con coordenadas, unidades y vecinos ortogonales explícitos.
-- `combat`: `TurnScheduler`, que registra barras, calcula máximos, aumenta todas
-  las barras, determina las unidades listas y señala a quién corresponde actuar.
+A continuación se detalla la arquitectura, decisiones de diseño, patrones empleados y cumplimiento estricto de las especificaciones de las entregas **EP3**, **EP4** y **EF2**.
 
-### Decisiones del modelo
+---
 
-Los atributos fijos son `val`; el estado mutable se guarda en campos privados.
-Las listas públicas son inmutables. Unidades e ítems conservan identidad propia:
-dos unidades con los mismos atributos siguen siendo dos participantes distintos.
+## 1. Organización del Código
 
-El slot de arma y el dueño se pueden configurar por separado como datos de EP1.
-Las restricciones para equipar, los efectos de pociones, la ejecución de acciones,
-fuentes, objetivos y el flujo del controlador corresponden a entregas posteriores.
+El proyecto está organizado en paquetes desacoplados bajo `cl.uchile.dcc`:
 
-Los paneles reconocen como vecinos las cuatro direcciones ortogonales (no las
-diagonales), siguiendo el ejemplo de esquina del enunciado. `addNeighbor` registra
-la relación en el panel receptor; para un mapa bidireccional se registra en ambos.
+* `cl.uchile.dcc.controller`:
+  * `GameController`: Motor lógico que conecta el modelo con el flujo del juego, administra jugadores, paneles, la unidad en turno y la ejecución segura de acciones.
+* `cl.uchile.dcc.model.actions`:
+  * `Source`: Contrato para entidades capaces de originar y ejecutar acciones.
+  * `Target`: Contrato para entidades receptoras de acciones (unidades, paneles, utilizables).
+  * `Action`: Contrato base de acción ejecutable.
+  * `Attack`, `Move`, `EquipWeapon`, `ConsumePotion`.
+  * `Spell`, `BlackSpell`, `WhiteSpell`, `Thunder`, `Meteor`, `Healing`, `Purification`.
+* `cl.uchile.dcc.model.combat`:
+  * `TurnScheduler`: Programador dinámico de turnos basado en peso y tiempo.
+* `cl.uchile.dcc.model.exceptions`:
+  * Jerarquía de excepciones de dominio: `GameException`, `InvalidMovementException`, `DefeatedUnitException`, `NotEnoughManaException`, `DefeatedTargetException`, `InvalidTargetException`, `UnarmedAttackException`, `NonMagicalWeaponException`, `InvalidWeaponException`, `InvalidActionException`.
+* `cl.uchile.dcc.model.items`:
+  * `Usable`: Contrato de ítem almacenable en inventario.
+  * `weapons`: `Weapon`, `MagicWeapon`, `Sword`, `Dagger`, `Bow`, `Wand`, `Staff`.
+  * `potions`: `Potion`, `HealingPotion`, `StrengthPotion`, `ManaPotion`, `MagicStrengthPotion`.
+* `cl.uchile.dcc.model.map`:
+  * `Panel`: Casilla del mapa con coordenadas, almacén de unidades, vecinos ortogonales y receptor de movimiento / meteoritos.
+* `cl.uchile.dcc.model.units`:
+  * `GameUnit`: Clase abstracta base que implementa `Source` y `Target`.
+  * `Character`: Personaje con inventario, armas y doble dispatch para equipamiento.
+  * `MagicCharacter`: Personaje mágico con maná y hechizos.
+  * `Knight`, `Archer`, `Thief`, `BlackMage`, `WhiteMage`, `Enemy`.
 
-El máximo de barra es `peso + pesoArma / 2.0` para personajes y `peso` para enemigos.
-Sin arma se considera peso de arma cero. Se calcula usando el slot actual, por lo
-que refleja un cambio de arma. El progreso usa `Double` para conservar fracciones.
-El excedente no se recorta: define la prioridad de quienes completaron su barra.
-En empates se usa el orden de ingreso. `nextUnit` consulta sin modificar el estado;
-al terminar la acción, `resetBar` deja la barra de esa unidad en cero.
+---
 
-Añadir una unidad repetida no borra su progreso. Quitar o reiniciar una unidad
-ausente no tiene efecto. Consultar su barra devuelve `None`. Los incrementos deben
-ser finitos y no negativos. Estas decisiones también tienen pruebas.
+## 2. Patrones de Diseño y Decisiones de Arquitectura
 
-### Ejecutar las pruebas
+### A. Double Dispatch y Eliminación Total de `isInstanceOf` / `getClass`
+El curso exige expresamente: *"No uses isInstanceOf/getClass para elegir comportamiento fuera de equals en los ejercicios del ramo"*. El desafío central de la Tarea 2 consistía en desambiguar la tríada dinámica: `(Source, Action, Target)`.
 
-Desde la carpeta `Mememon-2026-2`, ejecutar:
+Para lograr esto sin inspección de tipos ni *downcasting*:
+1. **Primer Dispatch (Invocación):**
+   `source.doAction(action, target)` verifica que el source esté con vida y delega en `action.execute(source, target)`.
+2. **Segundo Dispatch (Acción a Target / Source):**
+   La acción conoce su tipo específico y delega en el método apropiado del `Target` o del `Source`:
+   * `Attack` solicita a `source.calculatePhysicalAttackDamage()` el daño físico (un personaje verifica arma y extrae ataque; un enemigo retorna su ataque innato) y luego invoca `target.receiveAttack(source, damage)`.
+   * `Move` invoca directamente `target.receiveMove(source)`. Si el target es un `Panel`, este valida que sea adyacente al panel actual de la unidad y actualiza su posición.
+   * `EquipWeapon` y `ConsumePotion` delegan a `source.executeEquipWeapon` y `source.executeConsumePotion`, invocando `target.receiveEquipWeapon` o `target.receiveConsumePotion`. Si el objetivo es el arma/poción o el personaje mismo, se resuelven polimórficamente.
+   * `BlackSpell` y `WhiteSpell` delegan en `source.castBlackSpell` y `source.castWhiteSpell`, garantizando que magos negros solo lancen magia negra y magos blancos solo magia blanca.
+3. **Tercer Dispatch (Compatibilidad de Armas y Efectos de Pociones):**
+   * Al equipar un arma, `character.equip(weapon)` llama a `weapon.equipTo(character)`. Cada subclase de arma (`Sword`, `Dagger`, `Bow`, `Wand`, `Staff`) invoca el método correspondiente del personaje (`equipSword`, `equipBow`, etc.). Las clases que no permiten dicha arma lanzan `InvalidWeaponException`.
+   * Al consumir una poción, `potion.applyEffect(character)` llama al método especializado (`consumeHealingPotion`, `consumeStrengthPotion`, `consumeManaPotion`, `consumeMagicStrengthPotion`), aplicando restauraciones según si el personaje es común o mágico.
+
+### B. Arquitectura MVC (Modelo - Vista - Controlador)
+* Las entidades del modelo (`GameUnit`, `Panel`, `Action`, `TurnScheduler`, etc.) son completamente independientes y no tienen ninguna referencia al `GameController`.
+* El `GameController` centraliza el control del juego:
+  * Lleva el registro de jugadores, paneles y el `TurnScheduler`.
+  * Determina la unidad del turno activo (`currentUnit`).
+  * Avanza los turnos mediante `decideNextTurn(step)`.
+  * Al ejecutar `executeAction(action, target)`:
+    * Si la acción tiene éxito, limpia unidades derrotadas del combate, reinicia la barra de acción de la unidad en el scheduler y avanza al siguiente turno.
+    * Si la acción falla (lanza una excepción de juego), la captura en `lastError` para su diagnóstico y **no altera el turno ni reinicia la barra de acción de la unidad**, permitiendo al jugador reintentar otra acción válida.
+
+---
+
+## 3. Restricciones y Excepciones de Dominio (EP4)
+
+Se implementaron rigurosamente las 9 restricciones solicitadas mediante excepciones personalizadas:
+1. **Movimiento adyacente:** Moverse a un panel que no sea vecino ortogonal lanza `InvalidMovementException`.
+2. **Vida positiva:** Una unidad derrotada (`hitPoints == 0`) no puede ejecutar acciones; lanza `DefeatedUnitException`.
+3. **Maná suficiente:** Castear un hechizo sin tener los puntos de maná requeridos lanza `NotEnoughManaException`.
+4. **Objetivo no derrotado:** Una unidad derrotada no puede recibir acciones; lanza `DefeatedTargetException`.
+5. **Purificación exclusiva a enemigos:** Aplicar `Purification` sobre un personaje o panel lanza `InvalidTargetException`.
+6. **Curación exclusiva a personajes:** Aplicar `Healing` sobre un enemigo o panel lanza `InvalidTargetException`.
+7. **Ataque físico armado:** Un personaje sin arma equipada que intente atacar lanza `UnarmedAttackException`.
+8. **Hechizo con arma mágica:** Un personaje mágico sin arma mágica equipada (`Wand` o `Staff`) que intente lanzar un hechizo lanza `NonMagicalWeaponException`.
+9. **Cuadro de armas equipables:**
+   * **Caballero (Knight):** Espada, Daga, Arco (Varita y Bastón lanzan `InvalidWeaponException`).
+   * **Arquero (Archer):** Espada, Arco, Varita (Daga y Bastón lanzan `InvalidWeaponException`).
+   * **Ladrón (Thief):** Espada, Daga (Arco, Varita y Bastón lanzan `InvalidWeaponException`).
+   * **Mago Negro (Black Mage):** Daga, Varita, Bastón (Espada y Arco lanzan `InvalidWeaponException`).
+   * **Mago Blanco (White Mage):** Arco, Varita, Bastón (Espada y Daga lanzan `InvalidWeaponException`).
+   * **Enemigos:** No pueden equipar armas ni consumir pociones (`InvalidActionException`).
+
+---
+
+## 4. Pruebas Unitarias y Cobertura (MUnit)
+
+El proyecto cuenta con un conjunto exhaustivo de pruebas unitarias implementadas con MUnit que cubren casos de uso esperados, límites numéricos, casos de borde y todas las restricciones con `intercept[...]`:
+
+* `UnitsTest`: Inicialización de unidades, inventarios, derrotas y límites de vida/maná.
+* `ItemsTest`: Propiedades de las 5 armas y 4 pociones.
+* `PanelTest`: Coordenadas, vecindad ortogonal bidireccional y manejo de unidades.
+* `TurnSchedulerTest`: Progresión de barras, excedente de turnos, desempates y reinicios.
+* `DoubleDispatchActionsTest`: Ejecución completa de las 8 acciones mediante Double Dispatch.
+* `GameControllerTest`: Flujo de turnos, registro de jugadores, captura de excepciones y conservación de turnos.
+* `RestrictionsAndExceptionsTest`: Validación rigurosa de las 9 restricciones de EP4.
+* `EdgeCasesAndCoverageTest`: Casos de borde de objetivos inválidos y compatibilidad general.
+
+### Ejecución de Pruebas
+
+Para ejecutar la suite completa de pruebas desde el directorio del proyecto:
 
 ```bash
 sbt test
 ```
 
-Las pruebas MUnit están en `src/test/scala/model` y cubren EP1, EP2 y EF1,
-incluyendo casos vacíos, empates, máximos fraccionarios, reinicios y eliminación.
-Se conservan las versiones y dependencias originales de la plantilla.
+---
 
-## Descripción del Proyecto
+## 5. Historial de Ramas Git
 
-Este repositorio contiene la plantilla base para el proyecto semestral del curso. El objetivo principal es desarrollar una versión simplificada de un juego de combate táctico, enfocado exclusivamente en la implementación de la lógica de negocio mediante el patrón arquitectónico **Modelo-Vista-Controlador (MVC)**. 
-
-En particular, a lo largo del semestre trabajarán en la construcción del **Modelo** (las entidades del juego como personajes, armas, paneles y sus interacciones mediante acciones) y el **Controlador** (el motor lógico encargado de gestionar los turnos, flujo del juego y reglas, como `GameController`). No se implementará una Vista gráfica (frontend), por lo que todo se basará en código Scala puro.
-
-## Referencia Visual
-
-Aunque el proyecto se evaluará mediante pruebas unitarias y lógica de consola sin necesidad de conectarlo a una interfaz web, aquí tienen una imagen del "front-end" conceptual del juego. Esto les servirá para hacerse una idea de cómo deberían verse estructurados lógicamente el mapa (en base a paneles) y sus unidades a lo largo de las entregas:
-
-![resultado.jpg](resultado.jpg)
-
-## Enunciado del Proyecto
-
-Las reglas completas del juego, las entidades requeridas y el detalle de cada entrega parcial y final pueden encontrarse en el enunciado oficial del proyecto.
-
-[Link de ucursos del enunciado](https://www.u-cursos.cl/ingenieria/2026/2/CC3002/1/material_docente/detalle?id=10946097)
-
-## ¿Qué se estará evaluando?
-
-El trabajo a lo largo del semestre será evaluado principalmente en base a los siguientes tres pilares:
-
-1. **Diseño (50%)**: Se evaluará la calidad de su código, exigiendo que este cumpla con los principios de diseño orientado a objetos enseñados en el curso. Se espera un código extensible y con responsabilidades bien definidas.
-2. **Testing y Coverage (35%)**: Se evaluará que su código tenga pruebas automatizadas utilizando **MUnit** con una cobertura de al menos el 90% para obtener el puntaje completo. Las pruebas deben comprobar tanto los casos de uso esperados como los casos de borde (ej. fallos en restricciones de acciones).
-3. **Documentación (15%)**: Cada clase, interfaz (trait) y método público debe estar debidamente documentado usando el formato Scaladoc.
-
-## Cómo empezar
-
-1. Lean detenidamente el enunciado principal del proyecto.
-2. Exploren este código base. Encontrarán una clase inicial `GameController` en el paquete `controller` desde la cual podrán comenzar a articular su lógica.
-3. Asegúrense de usar herramientas de control de versiones (Git) de manera constante, documentando adecuadamente sus avances mediante *commits*.
+Siguiendo las pautas del proyecto, el trabajo se dividió ordenadamente en ramas:
+* `main`: Código base consolidado.
+* `entrega-final-1`: Entrega Final 1 (Tarea 1).
+* `entrega-parcial-3`: Entrega Parcial 3 (Sistema de acciones, Source, Target, Double Dispatch y GameController).
+* `entrega-parcial-4`: Entrega Parcial 4 (Restricciones, excepciones y captura de errores en controlador).
+* `entrega-final-2`: Entrega Final 2 (Tarea 2 completa, documentación exhaustiva y README final).
