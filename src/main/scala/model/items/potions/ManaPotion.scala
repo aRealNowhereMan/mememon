@@ -1,4 +1,7 @@
 package cl.uchile.dcc.model.items.potions
 
-/** A potion intended to restore mana. */
-class ManaPotion(name: String = "Mana potion") extends Potion(name)
+import cl.uchile.dcc.model.units.Character
+
+/** Restores 30% of a magical character's maximum mana. */
+class ManaPotion(name: String = "Mana potion") extends Potion(name):
+  override def applyEffect(character: Character): Unit = character.consumeManaPotion(this)
