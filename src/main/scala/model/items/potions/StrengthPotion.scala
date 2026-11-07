@@ -1,4 +1,7 @@
 package cl.uchile.dcc.model.items.potions
 
-/** A fortitude potion intended to increase defense. */
-class StrengthPotion(name: String = "Strength potion") extends Potion(name)
+import cl.uchile.dcc.model.units.Character
+
+/** Increases the consuming character's defense by 15%. */
+class StrengthPotion(name: String = "Strength potion") extends Potion(name):
+  override def applyEffect(character: Character): Unit = character.consumeStrengthPotion(this)
